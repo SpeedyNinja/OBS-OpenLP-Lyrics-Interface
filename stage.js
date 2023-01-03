@@ -1,7 +1,11 @@
 const LEFT = 0, RIGHT = 1, CENTER = 2, TOP = 0, BOTTOM = 1;
 
-$.ajaxSetup({cache: false});
+const HOST = window.location.hostname;
+const WEBSOCKET_PORT = 4317;
+const API_URL = `http://${HOST}:4316/api/v2`;
+
 var obsChannel = new BroadcastChannel("obs_openlp_channel");
+var openLPChannel = new WebSocket(`ws://${HOST}:${WEBSOCKET_PORT}`);
 
 var hideOnBlankScreen = false;
 var lyricsHidden = false;
@@ -33,15 +37,15 @@ var startingFont = 36;
 
 window.OpenLP = {
     updateTitle: function (event) {
-        $.getJSON("/api/service/list",
+        $.getJSON(`${API_URL}/service/items`,
                 function (data, status) {
                     let validTitle = false;
                     let titleDiv = $(".title");
-                    for (idx in data.results.items) {
+                    for (idx in data.items) {
                         idx = parseInt(idx, 10);
-                        if (data.results.items[idx]["selected"]) {
-                            let title = data.results.items[idx]["title"];
-                            let plugin = data.results.items[idx]["plugin"];
+                        if (data.items[idx]["selected"]) {
+                            let title = data.items[idx]["title"];
+                            let plugin = data.items[idx]["plugin"];
                             if (titleVisible[plugin]) {
                                 if (plugin === "bibles") {
                                     let location = String(/\d? ?\w+ \d+:[0-9, -]+/.exec(title)).trim();
@@ -78,27 +82,27 @@ window.OpenLP = {
     },
     loadSlides: function (event) {
         $.getJSON(
-                "/api/controller/live/text",
+                `${API_URL}/controller/live-items`,
                 function (data, status) {
-                    OpenLP.currentSlides = data.results.slides;
+                    OpenLP.currentSlides = data.slides;
                     OpenLP.currentSlide = 0;
                     let tag = "";
                     let lastChange = 0;
-                    $.each(data.results.slides, function (idx, slide) {
+                    $.each(data.slides, function (idx, slide) {
                         let prevtag = tag;
                         tag = slide["tag"];
                         if (tag != prevtag) {
                             // If the tag has changed, add new one to the list
                             lastChange = idx;
                         } else {
-                            if ((slide["text"] == data.results.slides[lastChange]["text"]) &&
-                                    (data.results.slides.length >= idx + (idx - lastChange))) {
+                            if ((slide["text"] == data.slides[lastChange]["text"]) &&
+                                    (data.slides.length >= idx + (idx - lastChange))) {
                                 // If the tag hasn't changed, check to see if the same verse
                                 // has been repeated consecutively. Note the verse may have been
                                 // split over several slides, so search through. If so, repeat the tag.
                                 let match = true;
                                 for (let idx2 = 0; idx2 < idx - lastChange; idx2++) {
-                                    if (data.results.slides[lastChange + idx2]["text"] != data.results.slides[idx + idx2]["text"]) {
+                                    if (data.slides[lastChange + idx2]["text"] != data.slides[idx + idx2]["text"]) {
                                         match = false;
                                         break;
                                     }
@@ -172,44 +176,49 @@ window.OpenLP = {
 
         obsChannel.postMessage(JSON.stringify({type: "lyrics", lines: text.split(/\n/g)}));
     },
-    pollServer: function () {
+    openLPUpdate: function (state) {
         let lyricsContainer = $(".lyrics").eq(lyricsContainerIndex);
         let titleDiv = $(".title");
-        $.getJSON(
-                "/api/poll",
-                function (data, status) {
-                    if (OpenLP.currentItem != data.results.item ||
-                            OpenLP.currentService != data.results.service) {
-                        OpenLP.currentItem = data.results.item;
-                        OpenLP.currentService = data.results.service;
-                        OpenLP.loadSlides();
-                    } else if (OpenLP.currentSlide != data.results.slide) {
-                        OpenLP.currentSlide = parseInt(data.results.slide, 10);
-                        OpenLP.updateSlide();
-                    }
-                    //if screen is blanked, hide on stream as well
-                    let blankScreen = data.results.display === true
-                            || data.results.theme === true
-                            || data.results.blank === true;
-                    if (blankScreen && hideOnBlankScreen || alwaysHide) {
-                        if (!lyricsHidden) {
-                            lyricsContainer.fadeOut(fadeDuration);
-                            titleDiv.fadeOut(fadeDuration);
-                            lyricsHidden = true;
-                        }
-                    } else {
-                        if (lyricsHidden) {
-                            if (!emptyString) {
-                                lyricsContainer.fadeIn(fadeDuration);
-                                if (!titleHidden) {
-                                    titleDiv.fadeIn(fadeDuration);
-                                }
-                            }
-                            lyricsHidden = false;
-                        }
+        if (OpenLP.currentItem != state.item ||
+                OpenLP.currentService != state.service) {
+            OpenLP.currentItem = state.item;
+            OpenLP.currentService = state.service;
+            OpenLP.loadSlides();
+        } else if (OpenLP.currentSlide != state.slide) {
+            OpenLP.currentSlide = parseInt(state.slide, 10);
+            OpenLP.updateSlide();
+        }
+        //if screen is blanked, hide on stream as well
+        let blankScreen = state.display === true
+                || state.theme === true
+                || state.blank === true;
+        if (blankScreen && hideOnBlankScreen || alwaysHide) {
+            if (!lyricsHidden) {
+                lyricsContainer.fadeOut(fadeDuration);
+                titleDiv.fadeOut(fadeDuration);
+                lyricsHidden = true;
+            }
+        } else {
+            if (lyricsHidden) {
+                if (!emptyString) {
+                    lyricsContainer.fadeIn(fadeDuration);
+                    if (!titleHidden) {
+                        titleDiv.fadeIn(fadeDuration);
                     }
                 }
-        );
+                lyricsHidden = false;
+            }
+        }
+    },
+    openLPChannelReceive: function (ev) {
+        
+        const reader = new FileReader();
+        reader.onload = () => {
+            const state = JSON.parse(reader.result.toString()).results;
+            OpenLP.openLPUpdate(state)
+        };
+        reader.readAsText(ev.data);
+
     },
     channelReceive: function (ev) {
         if (ev.data === null) {
@@ -307,12 +316,13 @@ window.OpenLP = {
                 textFormatting = data.value;
                 break;
             case "nextSlide":
-                $.get("/api/controller/live/next");
+                $.get(`${API_URL}/controller/live/next`);
                 break;
             case "previousSlide":
-                $.get("/api/controller/live/previous");
+                $.get(`${API_URL}/controller/live/previous`);
                 break;
             case "lyrics":
+                console.log(OpenLP.currentSlide)
                 if (data.value.length <= 4) { //empty str
                     lyricsContainer.fadeOut(fadeDuration);
                     emptyString = true;
@@ -390,8 +400,7 @@ window.OpenLP = {
     }
 };
 
-setInterval(OpenLP.pollServer, 250);
-OpenLP.pollServer();
+openLPChannel.onmessage = OpenLP.openLPChannelReceive;
 
 obsChannel.onmessage = OpenLP.channelReceive;
 obsChannel.postMessage(JSON.stringify({type: "init"}));
